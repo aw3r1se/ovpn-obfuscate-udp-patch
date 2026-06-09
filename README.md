@@ -199,16 +199,25 @@ cmake --build --preset mingw-x64
 
 ## Step 4: Configure
 
-Add one line to **both** the client and server config:
+Add to **both** the client and server config:
 
 ```
 obfuscate-udp <key> <padding>
+disable-dco
 ```
 
 ```
 remote <server> <port>
 proto  udp
 ```
+
+> **`disable-dco` is required.** The obfuscation hooks live in OpenVPN's
+> userspace link path (`forward.c`). DCO (Data Channel Offload) moves packet
+> I/O into the kernel driver (`ovpn-dco-win` / `ovpn-dco`), **bypassing** those
+> hooks — the TLS handshake then stalls after the first exchange because
+> subsequent packets go out un-obfuscated. DCO is on by default on Windows 2.7
+> builds whenever the driver is present, so it can switch on silently between
+> builds. Always set `disable-dco` (or build without DCO).
 
 - **key**: exactly 128 hex characters (= 64 bytes). The first 32 bytes drive
   the send direction, the last 32 the receive direction (see the key schedule
