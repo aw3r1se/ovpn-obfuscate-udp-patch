@@ -12,6 +12,15 @@ the **client** and the **server**.
 > **Status:** working — handshake + tunnel verified end-to-end.
 > **Crypto backend:** OpenSSL only (uses EVP, RAND and SHA).
 
+## Prebuilt client
+
+Don't want to build it yourself? A ready-to-run, patched OpenVPN client (and the
+full patched source as a fork) is available here:
+
+**https://github.com/aw3r1se/ovpn-obfuscate-udp** — see the
+[Releases](https://github.com/aw3r1se/ovpn-obfuscate-udp/releases) page for the
+prebuilt Windows binary.
+
 ---
 
 ## What's in this repo
