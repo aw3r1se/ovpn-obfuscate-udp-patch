@@ -1,0 +1,58 @@
+From f0f03b64fcd8c48b2bf4f8401fb945cc1147205d Mon Sep 17 00:00:00 2001
+From: aw3r1se <aw3r1se@gmail.com>
+Date: Tue, 9 Jun 2026 04:06:51 +0500
+Subject: [PATCH 3/3] obfs: parse the obfuscate-udp config directive
+
+Add "obfuscate-udp <128-hex-key> <padding>" to the option parser.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ src/openvpn/options.c | 25 +++++++++++++++++++++++++
+ 1 file changed, 25 insertions(+)
+
+diff --git a/src/openvpn/options.c b/src/openvpn/options.c
+index fb8adb2f..5f327ae7 100644
+--- a/src/openvpn/options.c
++++ b/src/openvpn/options.c
+@@ -44,6 +44,7 @@
+ #include "ssl.h"
+ #include "ssl_ncp.h"
+ #include "options.h"
++#include "obfs_udp.h"
+ #include "misc.h"
+ #include "socket_util.h"
+ #include "packet_id.h"
+@@ -6559,6 +6560,30 @@ add_option(struct options *options, char *p[], bool is_inline, const char *file,
+             goto err;
+         }
+     }
++    else if (streq(p[0], "obfuscate-udp") && p[1] && p[2] && !p[3])
++    {
++        VERIFY_PERMISSION(OPT_P_GENERAL);
++        if (strlen(p[1]) != OBFS_UDP_KEY_HEX_LEN)
++        {
++            msg(msglevel, "obfuscate-udp: key must be exactly %d hex characters",
++                OBFS_UDP_KEY_HEX_LEN);
++            goto err;
++        }
++        for (const char *h = p[1]; *h; ++h)
++        {
++            if (!isxdigit((unsigned char)*h))
++            {
++                msg(msglevel, "obfuscate-udp: key must be hexadecimal");
++                goto err;
++            }
++        }
++        if (!atoi_constrained(p[2], &options->obfs_udp_padding, p[0], 0, OBFS_UDP_MAX_PADDING,
++                              msglevel))
++        {
++            goto err;
++        }
++        options->obfs_udp_key = p[1];
++    }
+     else if (streq(p[0], "port") && p[1] && !p[2])
+     {
+         VERIFY_PERMISSION(OPT_P_GENERAL | OPT_P_CONNECTION);
+-- 
+2.45.1.windows.1
+

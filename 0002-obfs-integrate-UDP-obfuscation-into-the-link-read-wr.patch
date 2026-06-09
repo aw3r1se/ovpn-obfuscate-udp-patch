@@ -1,0 +1,171 @@
+From 776583e18b30c740780d28022f31391a6f83d7a7 Mon Sep 17 00:00:00 2001
+From: aw3r1se <aw3r1se@gmail.com>
+Date: Tue, 9 Jun 2026 04:06:51 +0500
+Subject: [PATCH 2/3] obfs: integrate UDP obfuscation into the link read/write
+ path
+
+Hook obfuscate/deobfuscate at the UDP link boundary in forward.c, store
+the obfuscation context in struct link_socket (shared by all multi
+instances, so this covers both client and tap server), and enlarge the
+frame tailroom in init.c to hold the appended padding.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ src/openvpn/forward.c | 40 ++++++++++++++++++++++++++++++++++++++++
+ src/openvpn/init.c    |  6 ++++++
+ src/openvpn/options.h |  4 ++++
+ src/openvpn/socket.c  |  2 ++
+ src/openvpn/socket.h  |  9 +++++++++
+ 5 files changed, 61 insertions(+)
+
+diff --git a/src/openvpn/forward.c b/src/openvpn/forward.c
+index 94d96b4b..dafff9ba 100644
+--- a/src/openvpn/forward.c
++++ b/src/openvpn/forward.c
+@@ -42,6 +42,7 @@
+ #include "dco.h"
+ #include "auth_token.h"
+ #include "tun_afunix.h"
++#include "obfs_udp.h"
+ 
+ #include "memdbg.h"
+ 
+@@ -918,6 +919,21 @@ link_socket_write_post_size_adjust(int *size, int size_delta, struct buffer *buf
+     }
+ }
+ 
++/*
++ * Lazily create the UDP obfuscation context for this link socket.  The socket
++ * is shared by all instances in server mode, so a single context serves the
++ * read path (top context) and every per-instance write path.
++ */
++static void
++link_socket_obfs_init(struct context *c, struct link_socket *sock)
++{
++    if (!sock->obfs_init_done)
++    {
++        sock->obfs_init_done = true;
++        sock->obfs = obfs_udp_init(c->options.obfs_udp_key, c->options.obfs_udp_padding);
++    }
++}
++
+ /*
+  * Output: c->c2.buf
+  */
+@@ -981,6 +997,17 @@ read_incoming_link(struct context *c, struct link_socket *sock)
+ 
+     /* Remove socks header if applicable */
+     socks_postprocess_incoming_link(c, sock);
++
++    /* Reverse UDP obfuscation (--obfuscate-udp) before the packet is processed */
++    if (c->options.obfs_udp_key && c->c2.buf.len > 0 && proto_is_udp(sock->info.proto))
++    {
++        link_socket_obfs_init(c, sock);
++        if (!sock->obfs || !obfs_udp_deobfuscate(sock->obfs, &c->c2.buf))
++        {
++            msg(D_LINK_ERRORS, "OBFS: deobfuscate failed, dropping packet");
++            c->c2.buf.len = 0; /* treat as an empty read so the packet is dropped */
++        }
++    }
+ }
+ 
+ bool
+@@ -1759,6 +1786,19 @@ process_outgoing_link(struct context *c, struct link_socket *sock)
+         int size = 0;
+         ASSERT(link_socket_actual_defined(c->c2.to_link_addr));
+ 
++        /* Apply UDP obfuscation (--obfuscate-udp) just before hitting the wire */
++        if (c->options.obfs_udp_key && proto_is_udp(sock->info.proto))
++        {
++            link_socket_obfs_init(c, sock);
++            if (!sock->obfs || !obfs_udp_obfuscate(sock->obfs, &c->c2.to_link))
++            {
++                msg(D_LINK_ERRORS, "OBFS: obfuscate failed, dropping packet");
++                buf_reset(&c->c2.to_link);
++                gc_free(&gc);
++                return;
++            }
++        }
++
+ #ifdef ENABLE_DEBUG
+         /* In gremlin-test mode, we may choose to drop this packet */
+         if (!c->options.gremlin || ask_gremlin(c->options.gremlin))
+diff --git a/src/openvpn/init.c b/src/openvpn/init.c
+index 1246cfb3..c1507242 100644
+--- a/src/openvpn/init.c
++++ b/src/openvpn/init.c
+@@ -2952,6 +2952,12 @@ frame_finalize_options(struct context *c, const struct options *o)
+     tailroom += COMP_EXTRA_BUFFER(payload_size);
+ #endif
+ 
++    /* UDP obfuscation appends up to obfs_udp_padding bytes after the packet */
++    if (o->obfs_udp_key)
++    {
++        tailroom += o->obfs_udp_padding;
++    }
++
+     frame->buf.payload_size = payload_size;
+     frame->buf.headroom = headroom;
+     frame->buf.tailroom = tailroom;
+diff --git a/src/openvpn/options.h b/src/openvpn/options.h
+index 05256d61..044c6686 100644
+--- a/src/openvpn/options.h
++++ b/src/openvpn/options.h
+@@ -331,6 +331,10 @@ struct options
+     bool ifconfig_nowarn;
+     int shaper;
+ 
++    /* UDP obfuscation (--obfuscate-udp <key> <padding>) */
++    const char *obfs_udp_key;
++    int obfs_udp_padding;
++
+     int proto_force;
+ 
+     bool mtu_test;
+diff --git a/src/openvpn/socket.c b/src/openvpn/socket.c
+index 82d297a4..f40ec5ec 100644
+--- a/src/openvpn/socket.c
++++ b/src/openvpn/socket.c
+@@ -29,6 +29,7 @@
+ #include "socket.h"
+ #include "fdmisc.h"
+ #include "misc.h"
++#include "obfs_udp.h"
+ #include "gremlin.h"
+ #include "plugin.h"
+ #include "ps.h"
+@@ -1846,6 +1847,7 @@ link_socket_close(struct link_socket *sock)
+         free_buf(&sock->stream_buf_data);
+         if (!gremlin)
+         {
++            obfs_udp_free(sock->obfs);
+             free(sock);
+         }
+     }
+diff --git a/src/openvpn/socket.h b/src/openvpn/socket.h
+index ebaf776f..79fcdf08 100644
+--- a/src/openvpn/socket.h
++++ b/src/openvpn/socket.h
+@@ -162,10 +162,19 @@ void socket_set_buffers(socket_descriptor_t fd, const struct socket_buffer_size
+  * defines try to abstract away our implementation differences between
+  * using sockets on Posix vs. Win32.
+  */
++/* Forward declaration; defined in obfs_udp.h. */
++struct obfs_udp;
++
+ struct link_socket
+ {
+     struct link_socket_info info;
+ 
++    /* UDP obfuscation (--obfuscate-udp); lazily initialized on first packet.
++     * The same link_socket is shared by all instances in server mode, so one
++     * context covers both the read and the per-instance write path. */
++    struct obfs_udp *obfs;
++    bool obfs_init_done;
++
+     struct event_arg ev_arg; /**< this struct will store a pointer to either mi or
+                               * link_socket, depending on the event type, to keep
+                               * it accessible it's placed within the same struct
+-- 
+2.45.1.windows.1
+
